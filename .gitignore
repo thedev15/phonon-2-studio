@@ -1,0 +1,9 @@
+.phonon-venv/
+__pycache__/
+*.pyc
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+.DS_Store
