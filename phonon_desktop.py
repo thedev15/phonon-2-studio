@@ -26,6 +26,10 @@ if not PHONON.exists():
 
 
 class PhononDesktop(tk.Tk):
+    AUDIO_QUEUE_SIZE = 32
+    MAX_EVENTS_PER_TICK = 200
+    VISUAL_INTERVAL_MS = 45
+
     def __init__(self) -> None:
         super().__init__()
         self.title("Phonon 2 Studio")
@@ -58,6 +62,10 @@ class PhononDesktop(tk.Tk):
         self._compact_layout = False
         self.signal_level = 0.05
         self.signal_target = 0.05
+        self._latest_audio_level = 0.05
+        self._signal_bars: list[int] = []
+        self._signal_bar_count = 0
+        self._signal_color = ""
         self.playing = False
         self.play_started = 0.0
         self.play_duration = 0.0
@@ -382,21 +390,32 @@ class PhononDesktop(tk.Tk):
         self.signal_level += (self.signal_target - self.signal_level) * 0.35
         if self._signal_canvas is not None:
             canvas = self._signal_canvas
-            canvas.delete("bars")
             width = max(canvas.winfo_width(), 300)
             center = 45
             bar_count = max(12, min(70, width // 15))
-            for index in range(bar_count):
-                phase = index * 0.72 + time.monotonic() * 5.5
+            if bar_count != self._signal_bar_count:
+                canvas.delete("bars")
+                self._signal_bars = [
+                    canvas.create_line(0, center, 0, center, width=3,
+                                       capstyle=tk.ROUND, tags="bars")
+                    for _ in range(bar_count)
+                ]
+                self._signal_bar_count = bar_count
+                self._signal_color = ""
+            now = time.monotonic()
+            color = "#7c6cff" if self.signal_level > 0.12 else "#334264"
+            for index, bar in enumerate(self._signal_bars):
+                phase = index * 0.72 + now * 5.5
                 wave_height = (math.sin(phase) + 1.0) * 0.5
                 height = 4 + (self.signal_level * 30 * wave_height)
                 x = 14 + index * ((width - 28) / max(bar_count - 1, 1))
-                color = "#7c6cff" if self.signal_level > 0.12 else "#334264"
-                canvas.create_line(x, center - height, x, center + height,
-                                   fill=color, width=3, capstyle=tk.ROUND, tags="bars")
+                canvas.coords(bar, x, center - height, x, center + height)
+                if color != self._signal_color:
+                    canvas.itemconfigure(bar, fill=color)
+            self._signal_color = color
         if self.playing:
             self._animate_playback()
-        self.after(45, self._animate_visuals)
+        self.after(self.VISUAL_INTERVAL_MS, self._animate_visuals)
 
     def _toggle_listen(self) -> None:
         if self.live_thread is not None:
@@ -425,8 +444,9 @@ class PhononDesktop(tk.Tk):
 
         self._stop_process()
         self._start_live_server()
-        audio_queue: queue.Queue[bytes] = queue.Queue()
+        audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=self.AUDIO_QUEUE_SIZE)
         self.live_stop.clear()
+        self._latest_audio_level = 0.04
 
         def callback(indata, frames, time_info, status) -> None:
             if status:
@@ -436,8 +456,15 @@ class PhononDesktop(tk.Tk):
             samples.frombytes(raw)
             if samples:
                 rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) / 32768
-                self.events.put(("level", str(min(1.0, rms * 3.5))))
-            audio_queue.put(raw)
+                self._latest_audio_level = min(1.0, rms * 3.5)
+            try:
+                audio_queue.put_nowait(raw)
+            except queue.Full:
+                try:
+                    audio_queue.get_nowait()
+                    audio_queue.put_nowait(raw)
+                except (queue.Empty, queue.Full):
+                    pass
 
         try:
             self.recording_stream = sd.RawInputStream(
@@ -466,7 +493,6 @@ class PhononDesktop(tk.Tk):
     def _websocket_live_loop(self, audio_queue: queue.Queue[bytes]) -> None:
         ws = None
         sender_done = threading.Event()
-        receiver_done = threading.Event()
         try:
             import websocket
             ws = websocket.create_connection(
@@ -509,8 +535,6 @@ class PhononDesktop(tk.Tk):
                 except Exception as exc:
                     if not self.live_stop.is_set():
                         self.events.put(("output", f"[live receive] {exc}\n"))
-                finally:
-                    receiver_done.set()
 
             sender = threading.Thread(target=send_audio, daemon=True)
             receiver = threading.Thread(target=receive_transcripts, daemon=True)
@@ -536,15 +560,18 @@ class PhononDesktop(tk.Tk):
         window_bytes = int(bytes_per_second * 1.6)
         step_seconds = 0.65
         next_decode = datetime.now().timestamp() + step_seconds
+        rolling_bytes = 0
         while not self.live_stop.is_set() or not audio_queue.empty():
             try:
-                rolling.append(audio_queue.get(timeout=0.05))
+                frame = audio_queue.get(timeout=0.05)
+                rolling.append(frame)
+                rolling_bytes += len(frame)
             except queue.Empty:
                 pass
-            while sum(len(frame) for frame in rolling) > window_bytes:
-                rolling.popleft()
+            while rolling_bytes > window_bytes:
+                rolling_bytes -= len(rolling.popleft())
             now = datetime.now().timestamp()
-            if now >= next_decode and sum(len(frame) for frame in rolling) >= window_bytes:
+            if now >= next_decode and rolling_bytes >= window_bytes:
                 self._transcribe_live_chunk(list(rolling))
                 next_decode = now + step_seconds
         if rolling:
@@ -621,11 +648,11 @@ class PhononDesktop(tk.Tk):
     def _append_live_text(self, text: str) -> None:
         words = text.split()
         previous = self.live_text.split()
+        previous_lower = [word.lower() for word in previous]
+        words_lower = [word.lower() for word in words]
         overlap = 0
         for size in range(min(len(previous), len(words)), 0, -1):
-            if [word.lower() for word in previous[-size:]] == [
-                word.lower() for word in words[:size]
-            ]:
+            if previous_lower[-size:] == words_lower[:size]:
                 overlap = size
                 break
         fresh = words[overlap:]
@@ -645,6 +672,7 @@ class PhononDesktop(tk.Tk):
             except Exception:
                 pass
         self.live_stop.set()
+        self._latest_audio_level = 0.04
         self.signal_target = 0.04
         if self.live_thread:
             self.live_thread.join(timeout=65)
@@ -671,8 +699,11 @@ class PhononDesktop(tk.Tk):
 
     def _drain_events(self) -> None:
         try:
-            while True:
+            self.signal_target = max(0.04, self._latest_audio_level)
+            processed = 0
+            while processed < self.MAX_EVENTS_PER_TICK:
                 kind, value = self.events.get_nowait()
+                processed += 1
                 if kind == "output":
                     self.output.insert("end", value)
                     self.output.see("end")
