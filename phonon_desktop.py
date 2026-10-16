@@ -26,9 +26,10 @@ class PhononDesktop(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Phonon 2 Studio")
-        self.geometry("1360x860")
-        self.minsize(1080, 700)
-        self.configure(bg="#0b1020")
+        self.geometry("1240x800")
+        self.minsize(900, 620)
+        self.configure(bg="#080d19")
+        self.tk.call("tk", "scaling", 1.08)
         self.process: subprocess.Popen[str] | None = None
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.file_path = tk.StringVar()
@@ -51,6 +52,7 @@ class PhononDesktop(tk.Tk):
         self.live_port = 18001
         self.live_threads = 8
         self.live_partial_start = "end-1c"
+        self._compact_layout = False
         self._configure_style()
         self._build_ui()
         self.after(100, self._drain_events)
@@ -72,7 +74,7 @@ class PhononDesktop(tk.Tk):
         style.configure("Heading.TLabel", background="#121a2d", foreground="#f3f6ff",
                         font=("Segoe UI", 13, "bold"))
         style.configure("Accent.TButton", background="#6d5dfc", foreground="white",
-                        padding=(14, 9), font=("Segoe UI", 10, "bold"))
+                        padding=(14, 10), font=("Segoe UI", 10, "bold"), relief="flat")
         style.map("Accent.TButton", background=[("active", "#8173ff")])
         style.configure("Ghost.TButton", background="#202b48", foreground="#d9e2ff",
                         padding=(12, 8))
@@ -88,12 +90,19 @@ class PhononDesktop(tk.Tk):
                         padding=(12, 8), font=("Segoe UI", 9, "bold"))
         style.map("Tab.TButton", background=[("active", "#1e2a48")],
                   foreground=[("active", "#f3f6ff")])
+        style.configure("TSeparator", background="#293755")
+        style.configure("TScrollbar", background="#18243b", troughcolor="#0a1120",
+                        bordercolor="#0a1120", arrowcolor="#8190b3")
+        style.map("TEntry", bordercolor=[("focus", "#7c6cff")],
+                  lightcolor=[("focus", "#7c6cff")], darkcolor=[("focus", "#7c6cff")])
 
     def _build_ui(self) -> None:
-        outer = ttk.Frame(self, padding=(34, 28, 34, 22))
+        outer = ttk.Frame(self, padding=(28, 24, 28, 18))
         outer.pack(fill="both", expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(2, weight=1)
         header = ttk.Frame(outer)
-        header.pack(fill="x", pady=(0, 18))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 16))
         brand = ttk.Frame(header)
         brand.pack(side="left")
         tk.Label(brand, text="PHONON", bg="#0a0f1d", fg="#7c6cff",
@@ -109,21 +118,60 @@ class PhononDesktop(tk.Tk):
         self._badge.pack(side="right", anchor="n", pady=(8, 0))
 
         metrics = ttk.Frame(outer)
-        metrics.pack(fill="x", pady=(0, 18))
+        metrics.grid(row=1, column=0, sticky="ew", pady=(0, 16))
         self._metric(metrics, "ENGINE", self.engine_value, "#7c6cff")
         self._metric(metrics, "PRIVACY", self.privacy_value, "#38d6a3")
         self._metric(metrics, "ACTIVITY", self.activity, "#f2b866")
 
         body = ttk.Frame(outer)
-        body.pack(fill="both", expand=True)
+        body.grid(row=2, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=0, minsize=315)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
         left = ttk.Frame(body, style="Card.TFrame", padding=24)
-        left.pack(side="left", fill="y", padx=(0, 18))
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
         right = ttk.Frame(body, style="Card.TFrame", padding=24)
-        right.pack(side="left", fill="both", expand=True)
+        right.grid(row=0, column=1, sticky="nsew")
         self._build_controls(left)
         self._build_output(right)
+        self._body = body
+        self._left_panel = left
+        self._right_panel = right
+        self.bind("<Configure>", self._layout_responsive, add="+")
+        self.bind("<Control-o>", lambda _event: self._browse(), add="+")
+        self.bind("<Control-Return>", lambda _event: self._transcribe_file(), add="+")
+        self.bind("<Control-s>", lambda _event: self._save_output(), add="+")
+        self.bind("<Control-l>", lambda _event: self._toggle_listen(), add="+")
+        self.bind("<Control-k>", lambda _event: self._clear_output(), add="+")
+        self.bind("<Escape>", lambda _event: self._stop_active(), add="+")
 
-        ttk.Label(outer, textvariable=self.status, style="Status.TLabel").pack(fill="x", pady=(18, 0))
+        ttk.Label(outer, textvariable=self.status, style="Status.TLabel").grid(
+            row=3, column=0, sticky="ew", pady=(16, 0)
+        )
+
+    def _layout_responsive(self, event: tk.Event) -> None:
+        compact = event.width < 1040
+        if compact == self._compact_layout:
+            return
+        self._compact_layout = compact
+        if compact:
+            self._body.columnconfigure(0, weight=1, minsize=0)
+            self._body.columnconfigure(1, weight=1)
+            self._left_panel.grid_configure(row=0, column=0, columnspan=2, padx=0, pady=(0, 14))
+            self._right_panel.grid_configure(row=1, column=0, columnspan=2)
+        else:
+            self._body.columnconfigure(0, weight=0, minsize=315)
+            self._body.columnconfigure(1, weight=1)
+            self._left_panel.grid_configure(row=0, column=0, columnspan=1, padx=(0, 16), pady=0)
+            self._right_panel.grid_configure(row=0, column=1, columnspan=1)
+
+    def _stop_active(self) -> None:
+        if self.live_thread is not None:
+            self._stop_windows_live()
+        elif self.process and self.process.poll() is None:
+            self._stop_process()
+            self.status.set("Stopped")
+            self.activity.set("Ready for a new session")
 
     def _metric(self, parent: ttk.Frame, label: str, value: tk.StringVar, color: str) -> None:
         card = tk.Frame(parent, bg="#121a2d", padx=16, pady=12)
@@ -140,22 +188,23 @@ class PhononDesktop(tk.Tk):
         tk.Label(parent, text="WORKSPACE", bg="#121a2d", fg="#7180a4",
                  font=("Segoe UI", 8, "bold")).pack(anchor="w")
         ttk.Label(parent, text="Transcribe a file", style="Heading.TLabel").pack(anchor="w", pady=(6, 0))
-        ttk.Label(parent, text="Audio formats supported by your local soundfile backend.",
+        ttk.Label(parent, text="Turn a recording into searchable text on this device.",
                   style="Muted.TLabel").pack(anchor="w", pady=(4, 14))
         file_row = ttk.Frame(parent, style="Card.TFrame")
         file_row.pack(fill="x")
         ttk.Entry(file_row, textvariable=self.file_path, width=34).pack(side="left", fill="x", expand=True)
-        ttk.Button(file_row, text="Browse", command=self._browse, style="Ghost.TButton").pack(side="left", padx=(8, 0))
-        ttk.Button(parent, text="✦  Transcribe file", command=self._transcribe_file,
+        ttk.Button(file_row, text="Open  (Ctrl+O)", command=self._browse,
+                   style="Ghost.TButton").pack(side="left", padx=(8, 0))
+        ttk.Button(parent, text="✦  Transcribe file  (Ctrl+Enter)", command=self._transcribe_file,
                    style="Accent.TButton").pack(fill="x", pady=(12, 22))
 
         ttk.Separator(parent).pack(fill="x", pady=(0, 20))
         ttk.Label(parent, text="Live microphone", style="Heading.TLabel").pack(anchor="w")
-        ttk.Label(parent, text="Stream microphone speech into the transcript panel in near real time.",
+        ttk.Label(parent, text="Stream microphone speech with live partial results.",
                   style="Muted.TLabel").pack(anchor="w", pady=(4, 12))
         mic_row = ttk.Frame(parent, style="Card.TFrame")
         mic_row.pack(fill="x")
-        self.listen_button = ttk.Button(mic_row, text="●  Start listening", command=self._toggle_listen,
+        self.listen_button = ttk.Button(mic_row, text="●  Start listening  (Ctrl+L)", command=self._toggle_listen,
                                         style="Accent.TButton")
         self.listen_button.pack(side="left", fill="x", expand=True)
         ttk.Button(mic_row, text="Clear", command=self._clear_output,
@@ -163,15 +212,19 @@ class PhononDesktop(tk.Tk):
 
         ttk.Separator(parent).pack(fill="x", pady=(22, 20))
         ttk.Label(parent, text="Recognition options", style="Heading.TLabel").pack(anchor="w")
-        ttk.Label(parent, text="Hotwords improve names, product terms, and jargon.",
+        ttk.Label(parent, text="Tune vocabulary and output without leaving the workspace.",
                   style="Muted.TLabel").pack(anchor="w", pady=(4, 10))
-        ttk.Entry(parent, textvariable=self.hotwords).pack(fill="x")
-        ttk.Checkbutton(parent, text="Include word timestamps as JSON",
+        hotwords_entry = ttk.Entry(parent, textvariable=self.hotwords)
+        hotwords_entry.pack(fill="x")
+        hotwords_entry.insert(0, "")
+        ttk.Label(parent, text="Hotwords  ·  comma-separated names and terms",
+                  style="Muted.TLabel").pack(anchor="w", pady=(5, 0))
+        ttk.Checkbutton(parent, text="Include word timestamps in JSON",
                         variable=self.json_output).pack(anchor="w", pady=(12, 20))
 
         ttk.Separator(parent).pack(fill="x", pady=(0, 20))
         ttk.Label(parent, text="Local API server", style="Heading.TLabel").pack(anchor="w")
-        ttk.Label(parent, text="OpenAI-compatible endpoint on localhost.",
+        ttk.Label(parent, text="Connect your own tools to a loopback-only endpoint.",
                   style="Muted.TLabel").pack(anchor="w", pady=(4, 10))
         port_row = ttk.Frame(parent, style="Card.TFrame")
         port_row.pack(fill="x")
@@ -189,11 +242,11 @@ class PhononDesktop(tk.Tk):
         ttk.Label(title_block, text="Transcript", style="Heading.TLabel").pack(anchor="w")
         ttk.Label(title_block, text="Your local words, ready to refine or export.",
                   style="Muted.TLabel").pack(anchor="w", pady=(3, 0))
-        ttk.Button(top, text="Save transcript", command=self._save_output,
+        ttk.Button(top, text="Save  (Ctrl+S)", command=self._save_output,
                    style="Ghost.TButton").pack(side="right")
         toolbar = ttk.Frame(parent, style="Card.TFrame")
         toolbar.pack(fill="x", pady=(18, 12))
-        ttk.Button(toolbar, text="Clear canvas", command=self._clear_output,
+        ttk.Button(toolbar, text="Clear canvas  (Ctrl+K)", command=self._clear_output,
                    style="Tab.TButton").pack(side="left")
         ttk.Label(toolbar, text="  •  Results stay on this machine",
                   style="Muted.TLabel").pack(side="left", padx=(8, 0))

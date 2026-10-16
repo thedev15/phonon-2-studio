@@ -14,6 +14,7 @@ Phonon 2 Studio is a polished desktop interface for [Phonon-2](https://github.co
 - **Partial transcripts** — words appear as Phonon emits them, with final phrases replacing temporary hypotheses cleanly.
 - **100% local** — audio and text stay on your machine.
 - **Beautiful studio UI** — file transcription, live dictation, hotwords, JSON timestamps, transcript export, and API controls.
+- **Responsive and accessible** — adapts from a two-column desktop workspace to a stacked narrow-window layout, with visible keyboard shortcuts and high-contrast focus states.
 - **OpenAI-compatible server** — start a local endpoint for your own tools at `127.0.0.1`.
 - **No duplicate words** — partial and final updates are handled as separate transcript states.
 
@@ -38,6 +39,8 @@ The first transcription downloads and verifies the Phonon-2 model. The model is 
 3. Speak into your Windows microphone.
 4. Watch partial text appear in the transcript canvas.
 5. Click **Stop live transcription** to finalize the stream.
+
+Useful shortcuts: `Ctrl+O` opens audio, `Ctrl+Enter` transcribes, `Ctrl+L` toggles live mode, `Ctrl+S` saves the transcript, `Ctrl+K` clears the canvas, and `Esc` stops active work.
 
 The app starts a loopback-only Phonon server on port `18001`, then streams raw microphone PCM through:
 
