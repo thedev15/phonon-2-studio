@@ -28,6 +28,8 @@ if not PHONON.exists():
 
 class PhononDesktop(tk.Tk):
     AUDIO_QUEUE_SIZE = 32
+    AUDIO_PACKET_BYTES = 3200
+    LIVE_READY_TIMEOUT = 5.0
     MAX_EVENTS_PER_TICK = 200
     VISUAL_INTERVAL_MS = 45
     EVENT_INTERVAL_MS = 30
@@ -64,6 +66,8 @@ class PhononDesktop(tk.Tk):
         self.live_port = 18001
         self.live_threads = 8
         self.live_partial_start = "end-1c"
+        self.live_ready = threading.Event()
+        self.live_start_error = ""
         self._partial_lock = threading.Lock()
         self._latest_partial: str | None = None
         self._compact_layout = False
@@ -463,6 +467,8 @@ class PhononDesktop(tk.Tk):
         self._start_live_server()
         audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=self.AUDIO_QUEUE_SIZE)
         self.live_stop.clear()
+        self.live_ready.clear()
+        self.live_start_error = ""
         self._latest_audio_level = 0.04
         noise_floor = 0.008
         noise_frames = 0
@@ -511,17 +517,33 @@ class PhononDesktop(tk.Tk):
                     pass
 
         try:
+            self._mode = "live"
+            self.live_thread = threading.Thread(
+                target=self._websocket_live_loop,
+                args=(audio_queue,),
+                daemon=True,
+            )
+            self.live_thread.start()
+            if not self.live_ready.wait(self.LIVE_READY_TIMEOUT):
+                self.live_stop.set()
+                self._stop_live_server()
+                self.live_thread = None
+                raise RuntimeError("The local speech stream did not become ready.")
+            if self.live_start_error:
+                raise RuntimeError(self.live_start_error)
             self.recording_stream = sd.RawInputStream(
-                samplerate=16000, blocksize=1600, channels=1,
+                samplerate=16000, blocksize=self.AUDIO_PACKET_BYTES // 2, channels=1,
                 dtype="int16", callback=callback,
             )
             self.recording_stream.start()
         except Exception as exc:
             self.recording_stream = None
+            self.live_stop.set()
+            self._stop_live_server()
+            self.live_thread = None
             messagebox.showerror("Microphone unavailable", str(exc))
             return
 
-        self._mode = "live"
         self.live_text = ""
         with self._partial_lock:
             self._latest_partial = None
@@ -529,13 +551,6 @@ class PhononDesktop(tk.Tk):
         self.listen_button.configure(text="■  Stop live transcription")
         self.status.set("Live transcription is listening locally")
         self.activity.set("Live transcription")
-        self.live_thread = threading.Thread(
-            target=self._websocket_live_loop,
-            args=(audio_queue,),
-            daemon=True,
-        )
-        self.live_thread.start()
-
     def _websocket_live_loop(self, audio_queue: queue.Queue[bytes]) -> None:
         ws = None
         sender_done = threading.Event()
@@ -546,6 +561,7 @@ class PhononDesktop(tk.Tk):
                 timeout=0.25,
             )
             ws.send(json.dumps({"sample_rate": 16000, "format": "pcm_s16le"}))
+            self.live_ready.set()
 
             def send_audio() -> None:
                 try:
@@ -594,6 +610,8 @@ class PhononDesktop(tk.Tk):
             sender.join()
             receiver.join(timeout=5)
         except Exception as exc:
+            self.live_start_error = str(exc)
+            self.live_ready.set()
             self.events.put(("output", f"[live] {exc}\n"))
         finally:
             if ws is not None:

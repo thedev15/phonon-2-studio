@@ -19,6 +19,7 @@ Phonon 2 Studio is a polished desktop interface for [Phonon-2](https://github.co
 - **Scrollable workspace** — the complete tool surface remains usable on compact windows without hiding controls.
 - **Adaptive live noise suppression** — the Windows microphone path estimates the room floor, removes low-frequency rumble, and softly attenuates noise before inference.
 - **Local ontology layer** — finalized speech can be classified into intents, entities, topics, and graph relations, then exported as a deterministic JSON knowledge graph.
+- **Audio-to-model latch** — the local stream connects and completes its handshake before the microphone opens, using fixed 100 ms PCM packets and bounded buffering to keep capture aligned with inference.
 - **OpenAI-compatible server** — start a local endpoint for your own tools at `127.0.0.1`.
 - **No duplicate words** — partial and final updates are handled as separate transcript states.
 
