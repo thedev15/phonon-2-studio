@@ -15,6 +15,8 @@ Phonon 2 Studio is a polished desktop interface for [Phonon-2](https://github.co
 - **100% local** — audio and text stay on your machine.
 - **Beautiful studio UI** — file transcription, live dictation, hotwords, JSON timestamps, transcript export, and API controls.
 - **Responsive and accessible** — adapts from a two-column desktop workspace to a stacked narrow-window layout, with visible keyboard shortcuts and high-contrast focus states.
+- **Synchronized motion** — live microphone energy animates the signal waveform, transcription pulses the activity state, and WAV preview playback shows progress in the same workspace.
+- **Scrollable workspace** — the complete tool surface remains usable on compact windows without hiding controls.
 - **OpenAI-compatible server** — start a local endpoint for your own tools at `127.0.0.1`.
 - **No duplicate words** — partial and final updates are handled as separate transcript states.
 
@@ -61,6 +63,8 @@ This is the same streaming protocol documented by the Phonon project, adapted fo
 | Transcript export | Save the current canvas as TXT or JSON |
 | Local API | Start an OpenAI-compatible endpoint for local integrations |
 | Engine status | See CPU engine, privacy state, and current activity |
+| Audio preview | Play a selected WAV and follow its animated progress |
+| Signal animation | Watch speaking intensity and transcription activity in the live waveform |
 
 ## Requirements
 

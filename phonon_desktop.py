@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import queue
 import json
+import math
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import urllib.request
 import wave
+from array import array
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -53,6 +56,12 @@ class PhononDesktop(tk.Tk):
         self.live_threads = 8
         self.live_partial_start = "end-1c"
         self._compact_layout = False
+        self.signal_level = 0.05
+        self.signal_target = 0.05
+        self.playing = False
+        self.play_started = 0.0
+        self.play_duration = 0.0
+        self.play_after: str | None = None
         self._configure_style()
         self._build_ui()
         self.after(100, self._drain_events)
@@ -123,8 +132,28 @@ class PhononDesktop(tk.Tk):
         self._metric(metrics, "PRIVACY", self.privacy_value, "#38d6a3")
         self._metric(metrics, "ACTIVITY", self.activity, "#f2b866")
 
-        body = ttk.Frame(outer)
-        body.grid(row=2, column=0, sticky="nsew")
+        body_view = ttk.Frame(outer)
+        body_view.grid(row=2, column=0, sticky="nsew")
+        body_view.columnconfigure(0, weight=1)
+        body_view.rowconfigure(0, weight=1)
+        body_canvas = tk.Canvas(body_view, bg="#080d19", highlightthickness=0, bd=0)
+        body_canvas.grid(row=0, column=0, sticky="nsew")
+        body_scroll = ttk.Scrollbar(body_view, orient="vertical", command=body_canvas.yview)
+        body_scroll.grid(row=0, column=1, sticky="ns")
+        body_canvas.configure(yscrollcommand=body_scroll.set)
+        body = ttk.Frame(body_canvas)
+        body_window = body_canvas.create_window((0, 0), window=body, anchor="nw")
+        body.bind("<Configure>", lambda _event: body_canvas.configure(
+            scrollregion=body_canvas.bbox("all")
+        ))
+        body_canvas.bind("<Configure>", lambda event: body_canvas.itemconfigure(
+            body_window, width=event.width
+        ))
+        body_canvas.bind_all("<MouseWheel>", lambda event: body_canvas.yview_scroll(
+            int(-event.delta / 120), "units"
+        ), add="+")
+        self._body_canvas = body_canvas
+        self._body_scroll = body_scroll
         body.columnconfigure(0, weight=0, minsize=315)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
@@ -137,6 +166,8 @@ class PhononDesktop(tk.Tk):
         self._body = body
         self._left_panel = left
         self._right_panel = right
+        self._signal_canvas = None
+        self._animate_visuals()
         self.bind("<Configure>", self._layout_responsive, add="+")
         self.bind("<Control-o>", lambda _event: self._browse(), add="+")
         self.bind("<Control-Return>", lambda _event: self._transcribe_file(), add="+")
@@ -197,6 +228,17 @@ class PhononDesktop(tk.Tk):
                    style="Ghost.TButton").pack(side="left", padx=(8, 0))
         ttk.Button(parent, text="✦  Transcribe file  (Ctrl+Enter)", command=self._transcribe_file,
                    style="Accent.TButton").pack(fill="x", pady=(12, 22))
+        playback_row = ttk.Frame(parent, style="Card.TFrame")
+        playback_row.pack(fill="x", pady=(0, 16))
+        self.play_button = ttk.Button(playback_row, text="▶  Play preview",
+                                      command=self._toggle_playback, style="Tab.TButton")
+        self.play_button.pack(side="left", fill="x", expand=True)
+        ttk.Button(playback_row, text="■", command=self._stop_playback,
+                   style="Tab.TButton").pack(side="left", padx=(8, 0))
+        self.play_progress = ttk.Progressbar(parent, mode="determinate", maximum=100)
+        self.play_progress.pack(fill="x", pady=(0, 4))
+        ttk.Label(parent, text="Preview follows the selected WAV while the signal animates.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(0, 12))
 
         ttk.Separator(parent).pack(fill="x", pady=(0, 20))
         ttk.Label(parent, text="Live microphone", style="Heading.TLabel").pack(anchor="w")
@@ -250,6 +292,14 @@ class PhononDesktop(tk.Tk):
                    style="Tab.TButton").pack(side="left")
         ttk.Label(toolbar, text="  •  Results stay on this machine",
                   style="Muted.TLabel").pack(side="left", padx=(8, 0))
+        self._signal_canvas = tk.Canvas(
+            parent, height=68, bg="#0d1425", highlightthickness=0, bd=0
+        )
+        self._signal_canvas.pack(fill="x", pady=(0, 12))
+        self._signal_canvas.create_text(
+            14, 14, anchor="w", text="LIVE SIGNAL", fill="#7180a4",
+            font=("Segoe UI", 8, "bold"), tags="signal-label"
+        )
         text_frame = ttk.Frame(parent, style="Panel.TFrame", padding=2)
         text_frame.pack(fill="both", expand=True)
         self.output = tk.Text(
@@ -269,6 +319,7 @@ class PhononDesktop(tk.Tk):
         )
         if path:
             self.file_path.set(path)
+            self._stop_playback()
 
     def _transcribe_file(self) -> None:
         if not self.file_path.get().strip():
@@ -280,6 +331,72 @@ class PhononDesktop(tk.Tk):
         if self.hotwords.get().strip():
             args.extend(["--hotwords", self.hotwords.get().strip()])
         self._run_background(args, "transcribe")
+
+    def _toggle_playback(self) -> None:
+        if self.playing:
+            self._stop_playback()
+            return
+        path = Path(self.file_path.get().strip())
+        if not path.exists():
+            messagebox.showinfo("Choose audio", "Select a local audio file first.")
+            return
+        if sys.platform != "win32" or path.suffix.lower() != ".wav":
+            messagebox.showinfo("WAV preview", "Playback preview currently supports WAV files on Windows.")
+            return
+        try:
+            import winsound
+            with wave.open(str(path), "rb") as audio_file:
+                self.play_duration = audio_file.getnframes() / max(audio_file.getframerate(), 1)
+            winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+            self.play_started = time.monotonic()
+            self.playing = True
+            self.play_button.configure(text="Ⅱ  Pause preview")
+            self.activity.set("Playing audio preview")
+        except Exception as exc:
+            messagebox.showerror("Playback unavailable", str(exc))
+
+    def _stop_playback(self) -> None:
+        if sys.platform == "win32":
+            try:
+                import winsound
+                winsound.PlaySound(None, winsound.SND_PURGE)
+            except Exception:
+                pass
+        self.playing = False
+        self.play_progress["value"] = 0
+        if hasattr(self, "play_button"):
+            self.play_button.configure(text="▶  Play preview")
+        if self.activity.get() == "Playing audio preview":
+            self.activity.set("Ready for a new session")
+
+    def _animate_playback(self) -> None:
+        if not self.playing:
+            return
+        elapsed = time.monotonic() - self.play_started
+        percent = min(100, (elapsed / max(self.play_duration, 0.1)) * 100)
+        self.play_progress["value"] = percent
+        if percent >= 100:
+            self._stop_playback()
+
+    def _animate_visuals(self) -> None:
+        self.signal_level += (self.signal_target - self.signal_level) * 0.35
+        if self._signal_canvas is not None:
+            canvas = self._signal_canvas
+            canvas.delete("bars")
+            width = max(canvas.winfo_width(), 300)
+            center = 45
+            bar_count = max(12, min(70, width // 15))
+            for index in range(bar_count):
+                phase = index * 0.72 + time.monotonic() * 5.5
+                wave_height = (math.sin(phase) + 1.0) * 0.5
+                height = 4 + (self.signal_level * 30 * wave_height)
+                x = 14 + index * ((width - 28) / max(bar_count - 1, 1))
+                color = "#7c6cff" if self.signal_level > 0.12 else "#334264"
+                canvas.create_line(x, center - height, x, center + height,
+                                   fill=color, width=3, capstyle=tk.ROUND, tags="bars")
+        if self.playing:
+            self._animate_playback()
+        self.after(45, self._animate_visuals)
 
     def _toggle_listen(self) -> None:
         if self.live_thread is not None:
@@ -314,7 +431,13 @@ class PhononDesktop(tk.Tk):
         def callback(indata, frames, time_info, status) -> None:
             if status:
                 self.events.put(("output", f"[microphone] {status}\n"))
-            audio_queue.put(bytes(indata))
+            raw = bytes(indata)
+            samples = array("h")
+            samples.frombytes(raw)
+            if samples:
+                rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) / 32768
+                self.events.put(("level", str(min(1.0, rms * 3.5))))
+            audio_queue.put(raw)
 
         try:
             self.recording_stream = sd.RawInputStream(
@@ -522,6 +645,7 @@ class PhononDesktop(tk.Tk):
             except Exception:
                 pass
         self.live_stop.set()
+        self.signal_target = 0.04
         if self.live_thread:
             self.live_thread.join(timeout=65)
             self.live_thread = None
@@ -552,11 +676,18 @@ class PhononDesktop(tk.Tk):
                 if kind == "output":
                     self.output.insert("end", value)
                     self.output.see("end")
+                elif kind == "level":
+                    self.signal_target = max(0.04, float(value))
+                    if self.live_thread is not None:
+                        self.activity.set("Speaking" if self.signal_target > 0.12 else "Listening")
                 elif kind == "partial":
+                    self.activity.set("Transcribing live audio")
+                    self.signal_target = max(self.signal_target, 0.18)
                     self.output.delete(self.live_partial_start, "end")
                     self.output.insert("end", value)
                     self.output.see("end")
                 elif kind in ("final", "done"):
+                    self.activity.set("Listening" if self.live_thread is not None else "Ready for a new session")
                     self.output.delete(self.live_partial_start, "end")
                     if value:
                         self.output.insert("end", value.strip() + " ")
@@ -600,6 +731,7 @@ class PhononDesktop(tk.Tk):
 
     def _clear_output(self) -> None:
         self.output.delete("1.0", "end")
+        self.live_text = ""
 
     def _save_output(self) -> None:
         content = self.output.get("1.0", "end").strip()
