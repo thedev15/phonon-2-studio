@@ -17,6 +17,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tempfile import NamedTemporaryFile
 
+from ontology import SpeechOntology
 
 ROOT = Path(__file__).resolve().parent
 PYTHON = ROOT / ".phonon-venv" / "Scripts" / "python.exe"
@@ -46,6 +47,7 @@ class PhononDesktop(tk.Tk):
         self.json_output = tk.BooleanVar(value=True)
         self.noise_suppression = tk.BooleanVar(value=True)
         self._noise_suppression_enabled = True
+        self.ontology = SpeechOntology()
         self.status = tk.StringVar(value="Ready")
         self.model_status = tk.StringVar(value="Phonon-2 • local CPU engine")
         self.activity = tk.StringVar(value="No active transcription")
@@ -308,6 +310,8 @@ class PhononDesktop(tk.Tk):
         toolbar.pack(fill="x", pady=(18, 12))
         ttk.Button(toolbar, text="Clear canvas  (Ctrl+K)", command=self._clear_output,
                    style="Tab.TButton").pack(side="left")
+        ttk.Button(toolbar, text="Export ontology", command=self._export_ontology,
+                   style="Tab.TButton").pack(side="left", padx=(8, 0))
         ttk.Label(toolbar, text="  •  Results stay on this machine",
                   style="Muted.TLabel").pack(side="left", padx=(8, 0))
         self._signal_canvas = tk.Canvas(
@@ -769,7 +773,9 @@ class PhononDesktop(tk.Tk):
                     self.activity.set("Listening" if self.live_thread is not None else "Ready for a new session")
                     self.output.delete(self.live_partial_start, "end")
                     if value:
-                        self.output.insert("end", value.strip() + " ")
+                        final_text = value.strip()
+                        self.output.insert("end", final_text + " ")
+                        self.ontology.ingest(final_text)
                     self.live_partial_start = self.output.index("end-1c")
                     self.output.see("end")
                 elif kind == "process_done":
@@ -790,6 +796,22 @@ class PhononDesktop(tk.Tk):
         if value:
             self.output.insert("end", value)
         self.output.see("end")
+
+    def _export_ontology(self) -> None:
+        if not self.ontology.turns:
+            messagebox.showinfo("Nothing to export", "Finish a transcript turn first.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export ontology", defaultextension=".json",
+            initialfile=f"phonon-ontology-{datetime.now():%Y%m%d-%H%M%S}.json",
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+        )
+        if path:
+            Path(path).write_text(
+                json.dumps(self.ontology.snapshot(), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            self.status.set(f"Exported ontology to {path}")
 
     def _run_background(self, args: list[str], mode: str) -> None:
         self._stop_process()
@@ -819,6 +841,7 @@ class PhononDesktop(tk.Tk):
     def _clear_output(self) -> None:
         self.output.delete("1.0", "end")
         self.live_text = ""
+        self.ontology.reset()
 
     def _save_output(self) -> None:
         content = self.output.get("1.0", "end").strip()
