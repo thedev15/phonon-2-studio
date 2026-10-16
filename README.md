@@ -17,6 +17,7 @@ Phonon 2 Studio is a polished desktop interface for [Phonon-2](https://github.co
 - **Responsive and accessible** — adapts from a two-column desktop workspace to a stacked narrow-window layout, with visible keyboard shortcuts and high-contrast focus states.
 - **Synchronized motion** — live microphone energy animates the signal waveform, transcription pulses the activity state, and WAV preview playback shows progress in the same workspace.
 - **Scrollable workspace** — the complete tool surface remains usable on compact windows without hiding controls.
+- **Adaptive live noise suppression** — the Windows microphone path estimates the room floor, removes low-frequency rumble, and softly attenuates noise before inference.
 - **OpenAI-compatible server** — start a local endpoint for your own tools at `127.0.0.1`.
 - **No duplicate words** — partial and final updates are handled as separate transcript states.
 
@@ -44,6 +45,8 @@ The first transcription downloads and verifies the Phonon-2 model. The model is 
 
 Useful shortcuts: `Ctrl+O` opens audio, `Ctrl+Enter` transcribes, `Ctrl+L` toggles live mode, `Ctrl+S` saves the transcript, `Ctrl+K` clears the canvas, and `Esc` stops active work.
 
+Adaptive noise suppression is enabled by default for live mode. It is software microphone preprocessing—not headphone/speaker active noise cancellation—and can be disabled under **Recognition options** when using a clean studio signal.
+
 The app starts a loopback-only Phonon server on port `18001`, then streams raw microphone PCM through:
 
 ```text
@@ -65,6 +68,7 @@ This is the same streaming protocol documented by the Phonon project, adapted fo
 | Engine status | See CPU engine, privacy state, and current activity |
 | Audio preview | Play a selected WAV and follow its animated progress |
 | Signal animation | Watch speaking intensity and transcription activity in the live waveform |
+| Noise suppression | Reduce steady room noise and rumble before live inference |
 
 ## Requirements
 

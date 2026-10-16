@@ -44,6 +44,8 @@ class PhononDesktop(tk.Tk):
         self.hotwords = tk.StringVar()
         self.port = tk.IntVar(value=8000)
         self.json_output = tk.BooleanVar(value=True)
+        self.noise_suppression = tk.BooleanVar(value=True)
+        self._noise_suppression_enabled = True
         self.status = tk.StringVar(value="Ready")
         self.model_status = tk.StringVar(value="Phonon-2 • local CPU engine")
         self.activity = tk.StringVar(value="No active transcription")
@@ -274,6 +276,11 @@ class PhononDesktop(tk.Tk):
                   style="Muted.TLabel").pack(anchor="w", pady=(5, 0))
         ttk.Checkbutton(parent, text="Include word timestamps in JSON",
                         variable=self.json_output).pack(anchor="w", pady=(12, 20))
+        ttk.Checkbutton(
+            parent, text="Adaptive noise suppression (live mic)",
+            variable=self.noise_suppression,
+            command=self._update_noise_suppression,
+        ).pack(anchor="w", pady=(0, 20))
 
         ttk.Separator(parent).pack(fill="x", pady=(0, 20))
         ttk.Label(parent, text="Local API server", style="Heading.TLabel").pack(anchor="w")
@@ -434,6 +441,9 @@ class PhononDesktop(tk.Tk):
             self._run_background(["listen"], "listen")
             self.listen_button.configure(text="■  Stop listening")
 
+    def _update_noise_suppression(self) -> None:
+        self._noise_suppression_enabled = self.noise_suppression.get()
+
     def _start_windows_live(self) -> None:
         try:
             import sounddevice as sd
@@ -450,13 +460,40 @@ class PhononDesktop(tk.Tk):
         audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=self.AUDIO_QUEUE_SIZE)
         self.live_stop.clear()
         self._latest_audio_level = 0.04
+        noise_floor = 0.008
+        noise_frames = 0
+        previous_input = 0.0
+        previous_output = 0.0
 
         def callback(indata, frames, time_info, status) -> None:
+            nonlocal noise_floor, noise_frames, previous_input, previous_output
             if status:
                 self.events.put(("output", f"[microphone] {status}\n"))
             raw = bytes(indata)
             samples = array("h")
             samples.frombytes(raw)
+            if self._noise_suppression_enabled and samples:
+                filtered = array("h")
+                sum_squares = 0.0
+                for sample in samples:
+                    normalized = sample / 32768.0
+                    high_passed = normalized - previous_input + (0.995 * previous_output)
+                    previous_input = normalized
+                    previous_output = high_passed
+                    filtered_value = max(-1.0, min(1.0, high_passed))
+                    filtered.append(int(filtered_value * 32767))
+                    sum_squares += high_passed * high_passed
+                frame_rms = math.sqrt(sum_squares / len(filtered))
+                if noise_frames < 18:
+                    noise_floor = (noise_floor * 0.9) + (frame_rms * 0.1)
+                    noise_frames += 1
+                threshold = max(0.012, noise_floor * 2.4)
+                if frame_rms < threshold:
+                    gain = max(0.18, frame_rms / threshold)
+                    for index, value in enumerate(filtered):
+                        filtered[index] = int(value * gain)
+                raw = filtered.tobytes()
+                samples = filtered
             if samples:
                 rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) / 32768
                 self._latest_audio_level = min(1.0, rms * 3.5)
