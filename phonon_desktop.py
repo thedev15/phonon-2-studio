@@ -695,7 +695,7 @@ class PhononDesktop(tk.Tk):
         for line in process.stdout:
             self.events.put(("output", line))
         code = process.wait()
-        self.events.put(("done", str(code)))
+        self.events.put(("process_done", str(code)))
 
     def _drain_events(self) -> None:
         try:
@@ -724,7 +724,7 @@ class PhononDesktop(tk.Tk):
                         self.output.insert("end", value.strip() + " ")
                     self.live_partial_start = self.output.index("end-1c")
                     self.output.see("end")
-                else:
+                elif kind == "process_done":
                     self.status.set("Ready" if value == "0" else f"Process exited with code {value}")
                     self.activity.set("Ready for a new session")
                     if getattr(self, "_mode", "") in ("listen", "live"):
