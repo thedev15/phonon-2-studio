@@ -30,6 +30,7 @@ class PhononDesktop(tk.Tk):
     AUDIO_QUEUE_SIZE = 32
     AUDIO_PACKET_BYTES = 3200
     LIVE_READY_TIMEOUT = 5.0
+    MODEL_LATCH_TIMEOUT = 2.0
     MAX_EVENTS_PER_TICK = 200
     VISUAL_INTERVAL_MS = 45
     EVENT_INTERVAL_MS = 30
@@ -67,6 +68,8 @@ class PhononDesktop(tk.Tk):
         self.live_threads = 8
         self.live_partial_start = "end-1c"
         self.live_ready = threading.Event()
+        self.audio_started = threading.Event()
+        self.model_latched = threading.Event()
         self.live_start_error = ""
         self._partial_lock = threading.Lock()
         self._latest_partial: str | None = None
@@ -465,18 +468,21 @@ class PhononDesktop(tk.Tk):
 
         self._stop_process()
         self._start_live_server()
-        audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=self.AUDIO_QUEUE_SIZE)
+        audio_queue: queue.Queue[tuple[int, bytes]] = queue.Queue(maxsize=self.AUDIO_QUEUE_SIZE)
         self.live_stop.clear()
         self.live_ready.clear()
+        self.audio_started.clear()
+        self.model_latched.clear()
         self.live_start_error = ""
         self._latest_audio_level = 0.04
+        packet_number = 0
         noise_floor = 0.008
         noise_frames = 0
         previous_input = 0.0
         previous_output = 0.0
 
         def callback(indata, frames, time_info, status) -> None:
-            nonlocal noise_floor, noise_frames, previous_input, previous_output
+            nonlocal noise_floor, noise_frames, previous_input, previous_output, packet_number
             if status:
                 self.events.put(("output", f"[microphone] {status}\n"))
             raw = bytes(indata)
@@ -507,12 +513,14 @@ class PhononDesktop(tk.Tk):
             if samples:
                 rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples)) / 32768
                 self._latest_audio_level = min(1.0, rms * 3.5)
+            packet_number += 1
+            packet = (packet_number, raw)
             try:
-                audio_queue.put_nowait(raw)
+                audio_queue.put_nowait(packet)
             except queue.Full:
                 try:
                     audio_queue.get_nowait()
-                    audio_queue.put_nowait(raw)
+                    audio_queue.put_nowait(packet)
                 except (queue.Empty, queue.Full):
                     pass
 
@@ -536,6 +544,9 @@ class PhononDesktop(tk.Tk):
                 dtype="int16", callback=callback,
             )
             self.recording_stream.start()
+            self.audio_started.set()
+            if not self.model_latched.wait(self.MODEL_LATCH_TIMEOUT):
+                raise RuntimeError("The model did not latch onto the microphone stream.")
         except Exception as exc:
             self.recording_stream = None
             self.live_stop.set()
@@ -551,7 +562,7 @@ class PhononDesktop(tk.Tk):
         self.listen_button.configure(text="■  Stop live transcription")
         self.status.set("Live transcription is listening locally")
         self.activity.set("Live transcription")
-    def _websocket_live_loop(self, audio_queue: queue.Queue[bytes]) -> None:
+    def _websocket_live_loop(self, audio_queue: queue.Queue[tuple[int, bytes]]) -> None:
         ws = None
         sender_done = threading.Event()
         try:
@@ -564,13 +575,21 @@ class PhononDesktop(tk.Tk):
             self.live_ready.set()
 
             def send_audio() -> None:
+                first_packet_sent = False
                 try:
+                    while not self.audio_started.wait(0.05):
+                        if self.live_stop.is_set():
+                            return
                     while not self.live_stop.is_set() or not audio_queue.empty():
                         try:
-                            frame = audio_queue.get(timeout=0.02)
+                            packet_number, frame = audio_queue.get(timeout=0.02)
                         except queue.Empty:
                             continue
                         ws.send(frame, opcode=websocket.ABNF.OPCODE_BINARY)
+                        if not first_packet_sent:
+                            first_packet_sent = True
+                            self.model_latched.set()
+                            self.events.put(("live_state", "Audio and model latched"))
                     ws.send(json.dumps({"type": "end"}))
                 except Exception as exc:
                     self.events.put(("output", f"[live send] {exc}\n"))
@@ -620,7 +639,7 @@ class PhononDesktop(tk.Tk):
                 except Exception:
                     pass
 
-    def _live_transcription_loop(self, audio_queue: queue.Queue[bytes]) -> None:
+    def _live_transcription_loop(self, audio_queue: queue.Queue[tuple[int, bytes]]) -> None:
         # Phonon's Windows CPU engine is file-oriented, so emulate streaming
         # with short overlapping windows. The overlap preserves word context;
         # deduplication below prevents repeated words in the canvas.
@@ -632,7 +651,7 @@ class PhononDesktop(tk.Tk):
         rolling_bytes = 0
         while not self.live_stop.is_set() or not audio_queue.empty():
             try:
-                frame = audio_queue.get(timeout=0.05)
+                _packet_number, frame = audio_queue.get(timeout=0.05)
                 rolling.append(frame)
                 rolling_bytes += len(frame)
             except queue.Empty:
@@ -803,6 +822,8 @@ class PhononDesktop(tk.Tk):
                         self.listen_button.configure(text="●  Start listening")
                     if getattr(self, "_mode", "") == "serve":
                         self.server_button.configure(text="Start API server")
+                elif kind == "live_state":
+                    self.status.set(value)
         except queue.Empty:
             pass
         self.after(self.EVENT_INTERVAL_MS, self._drain_events)
