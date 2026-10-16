@@ -29,6 +29,7 @@ class PhononDesktop(tk.Tk):
     AUDIO_QUEUE_SIZE = 32
     MAX_EVENTS_PER_TICK = 200
     VISUAL_INTERVAL_MS = 45
+    EVENT_INTERVAL_MS = 30
 
     def __init__(self) -> None:
         super().__init__()
@@ -59,6 +60,8 @@ class PhononDesktop(tk.Tk):
         self.live_port = 18001
         self.live_threads = 8
         self.live_partial_start = "end-1c"
+        self._partial_lock = threading.Lock()
+        self._latest_partial: str | None = None
         self._compact_layout = False
         self.signal_level = 0.05
         self.signal_target = 0.05
@@ -479,6 +482,8 @@ class PhononDesktop(tk.Tk):
 
         self._mode = "live"
         self.live_text = ""
+        with self._partial_lock:
+            self._latest_partial = None
         self.live_partial_start = self.output.index("end-1c")
         self.listen_button.configure(text="■  Stop live transcription")
         self.status.set("Live transcription is listening locally")
@@ -525,7 +530,12 @@ class PhononDesktop(tk.Tk):
                                 continue
                             continue
                         event_type = message.get("type")
-                        if event_type in ("partial", "final", "done"):
+                        if event_type == "partial":
+                            with self._partial_lock:
+                                self._latest_partial = message.get("text", "")
+                        elif event_type in ("final", "done"):
+                            with self._partial_lock:
+                                self._latest_partial = None
                             self.events.put((event_type, message.get("text", "")))
                         elif event_type == "error":
                             self.events.put(("output", f"[live] {message.get('message', 'Unknown error')}\n"))
@@ -672,6 +682,8 @@ class PhononDesktop(tk.Tk):
             except Exception:
                 pass
         self.live_stop.set()
+        with self._partial_lock:
+            self._latest_partial = None
         self._latest_audio_level = 0.04
         self.signal_target = 0.04
         if self.live_thread:
@@ -701,6 +713,11 @@ class PhononDesktop(tk.Tk):
         try:
             self.signal_target = max(0.04, self._latest_audio_level)
             processed = 0
+            with self._partial_lock:
+                partial = self._latest_partial
+                self._latest_partial = None
+            if partial is not None:
+                self._render_partial(partial)
             while processed < self.MAX_EVENTS_PER_TICK:
                 kind, value = self.events.get_nowait()
                 processed += 1
@@ -711,12 +728,6 @@ class PhononDesktop(tk.Tk):
                     self.signal_target = max(0.04, float(value))
                     if self.live_thread is not None:
                         self.activity.set("Speaking" if self.signal_target > 0.12 else "Listening")
-                elif kind == "partial":
-                    self.activity.set("Transcribing live audio")
-                    self.signal_target = max(self.signal_target, 0.18)
-                    self.output.delete(self.live_partial_start, "end")
-                    self.output.insert("end", value)
-                    self.output.see("end")
                 elif kind in ("final", "done"):
                     self.activity.set("Listening" if self.live_thread is not None else "Ready for a new session")
                     self.output.delete(self.live_partial_start, "end")
@@ -733,7 +744,15 @@ class PhononDesktop(tk.Tk):
                         self.server_button.configure(text="Start API server")
         except queue.Empty:
             pass
-        self.after(100, self._drain_events)
+        self.after(self.EVENT_INTERVAL_MS, self._drain_events)
+
+    def _render_partial(self, value: str) -> None:
+        self.activity.set("Transcribing live audio")
+        self.signal_target = max(self.signal_target, 0.18)
+        self.output.delete(self.live_partial_start, "end")
+        if value:
+            self.output.insert("end", value)
+        self.output.see("end")
 
     def _run_background(self, args: list[str], mode: str) -> None:
         self._stop_process()
